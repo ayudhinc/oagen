@@ -5,7 +5,7 @@
  * classifies each change into a specific category with policy-aware severity.
  */
 
-import type { CompatSymbol, CompatParameter } from './ir.js';
+import type { CompatSymbol, CompatParameter, LanguageId } from './ir.js';
 import type { CompatPolicyHints } from './policy.js';
 import type { CompatChangeCategory, CompatChangeSeverity, CompatProvenance } from './config.js';
 import { defaultSeverityForCategory } from './config.js';
@@ -48,6 +48,189 @@ export interface ClassificationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Type-form normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a type annotation string to a canonical form before equality
+ * comparison. Emitters evolve their annotation style across releases (e.g.
+ * Python's PEP 604 `X | None` replacing `Optional[X]`, PEP 585 lowercase
+ * generics, or dropping quotes from forward refs); such changes are cosmetic
+ * and must not register as breaking type changes. Only Python needs this
+ * today — other languages encode optionality with a single stable spelling
+ * (`*Foo`, `Option<T>`, `T?`, `T.nilable(Foo)`) so they use exact comparison.
+ * String-literal *values* inside `Literal[...]` are preserved verbatim so a
+ * genuine change to a wire value stays visible. When `language` is absent
+ * (older snapshots) no normalization is applied, preserving prior behaviour.
+ */
+function normalizeType(type: string, language?: LanguageId): string {
+  if (!type) return type;
+  if (language !== 'python') return type;
+  return canonicalizePythonType(type);
+}
+
+/** PEP 585 capitalized builtins that map to their lowercase spellings, so
+ *  `List[str]` and `list[str]` compare equal. */
+const PEP585_BUILTINS: Record<string, string> = {
+  List: 'list',
+  Dict: 'dict',
+  Tuple: 'tuple',
+  Set: 'set',
+  FrozenSet: 'frozenset',
+  Type: 'type',
+};
+
+/** Recursively canonicalize a Python annotation. Structural forms are
+ *  normalized (`Optional[X]`→`X | None`, `Union[...]`→` | ` joins, PEP 585
+ *  builtins, quoted forward refs, parenthesized unions), but `Literal[...]`
+ *  arguments are preserved verbatim — their quotes and inner whitespace are
+ *  part of the wire value, not cosmetic. */
+function canonicalizePythonType(s: string): string {
+  const t = s.trim();
+  if (t.length === 0) return t;
+  // Strip a wrapping pair of parentheses — the emitter sometimes groups
+  // multi-line unions as `(A | B)`. Recurse in case of nested wrapping.
+  if (t.startsWith('(') && t.endsWith(')')) {
+    return canonicalizePythonType(t.slice(1, -1));
+  }
+  // Literal[...] holds *values*, not types. Normalize the quote *character*
+  // (single ↔ double) so a cosmetic emitter quote-style flip doesn't register
+  // as a change, but preserve each argument's inner content verbatim so a
+  // real change to a wire value (e.g. `"a b"` → `"a  b"`) stays visible.
+  // Only spacing between arguments is normalized.
+  if (t.startsWith('Literal[') && t.endsWith(']')) {
+    const inner = t.slice('Literal['.length, -1);
+    return `Literal[${splitTopLevel(inner, ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map(canonicalizeLiteralArg)
+      .join(', ')}]`;
+  }
+  if (t.startsWith('Optional[') && t.endsWith(']')) {
+    return `${canonicalizePythonType(t.slice('Optional['.length, -1))} | None`;
+  }
+  if (t.startsWith('Union[') && t.endsWith(']')) {
+    return splitTopLevel(t.slice('Union['.length, -1), ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map(canonicalizePythonType)
+      .join(' | ');
+  }
+  // PEP 604 union at top level: split on `|` and canonicalize each arm.
+  if (t.includes('|')) {
+    const arms = splitTopLevel(t, '|')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (arms.length > 1) return arms.map(canonicalizePythonType).join(' | ');
+  }
+  // Other generic (Dict[str, Any], list[Foo]): preserve the outer constructor,
+  // lowercase PEP 585 builtins, and canonicalize each type argument.
+  const open = t.indexOf('[');
+  if (open !== -1 && t.endsWith(']')) {
+    const outer = t.slice(0, open).trim();
+    const inner = t.slice(open + 1, -1);
+    const canonicalOuter = PEP585_BUILTINS[outer] ?? outer;
+    return `${canonicalOuter}[${splitTopLevel(inner, ',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map(canonicalizePythonType)
+      .join(', ')}]`;
+  }
+  // Quoted forward ref: "Foo" / 'Foo' → Foo. The emitter quotes type names
+  // defined later in the file; the quotes are cosmetic. String-literal values
+  // are preserved by the Literal branch above, so this only strips quotes from
+  // bare type-name references.
+  if (
+    (t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
+    (t.startsWith("'") && t.endsWith("'") && t.length >= 2)
+  ) {
+    return t.slice(1, -1);
+  }
+  return PEP585_BUILTINS[t] ?? t;
+}
+
+/** Canonicalize one `Literal[...]` argument so semantically identical string
+ *  values compare equal regardless of quote style or escape form. The value
+ *  is decoded (backslash escapes processed) then re-encoded in a canonical
+ *  double-quoted form, so `Literal['say "hi"']` and `Literal["say \\"hi\\""]`
+ *  both canonicalize to `"say \"hi\""`. Bare (unquoted) arguments — e.g. an
+ *  enum name or a number — are returned unchanged. */
+function canonicalizeLiteralArg(arg: string): string {
+  const a = arg.trim();
+  if (a.length < 2) return a;
+  let quote: '"' | "'" | null = null;
+  if (a.startsWith('"') && a.endsWith('"')) quote = '"';
+  else if (a.startsWith("'") && a.endsWith("'")) quote = "'";
+  if (!quote) return a; // bare arg (type ref / number) — not a string literal
+  const value = decodeStringLiteral(a.slice(1, -1));
+  return `"${encodeDoubleQuoted(value)}"`;
+}
+
+/** Decode the backslash escapes inside a Python string literal's content.
+ *  Only the delimiter-relevant escapes (`\\`, `\'`, `\"`) are processed;
+ *  other sequences (`\n`, `\t`, `\u…`) are kept verbatim since they're
+ *  written identically regardless of quote style and so compare equal already. */
+function decodeStringLiteral(content: string): string {
+  let out = '';
+  for (let i = 0; i < content.length; i++) {
+    const c = content[i];
+    if (c === '\\' && i + 1 < content.length) {
+      const next = content[i + 1];
+      if (next === '\\' || next === '"' || next === "'") {
+        out += next;
+        i++;
+        continue;
+      }
+      out += c + next; // preserve unknown escape verbatim
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** Re-encode a decoded value as a canonical double-quoted Python string. */
+function encodeDoubleQuoted(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Split on a separator that sits at bracket-depth 0 and outside string
+ *  literals, so commas/pipes inside `Literal["a,b"]` or `"x|y"` are not split.
+ *  An escaped matching quote (`\"` inside a double-quoted string) does not
+ *  close the string: only a quote preceded by an even number of backslashes
+ *  (zero counts) is a real closing delimiter. */
+function splitTopLevel(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let inStr: string | null = null;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (c === inStr) {
+        let precedingBackslashes = 0;
+        for (let j = i - 1; j >= 0 && s[j] === '\\'; j--) precedingBackslashes++;
+        if (precedingBackslashes % 2 === 0) inStr = null;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inStr = c;
+      continue;
+    }
+    if (c === '[') depth++;
+    else if (c === ']') depth--;
+    else if (c === sep && depth === 0) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+// ---------------------------------------------------------------------------
 // Classification engine
 // ---------------------------------------------------------------------------
 
@@ -59,6 +242,7 @@ export function classifySymbolChanges(
   baseline: CompatSymbol,
   candidate: CompatSymbol | undefined,
   policy: CompatPolicyHints,
+  language?: LanguageId,
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
 
@@ -99,11 +283,15 @@ export function classifySymbolChanges(
 
   // Parameter-level changes (for callables and constructors)
   if (baseline.parameters && candidate.parameters) {
-    changes.push(...classifyParameterChanges(baseline, candidate, policy, specRef));
+    changes.push(...classifyParameterChanges(baseline, candidate, policy, specRef, language));
   }
 
   // Return type changes (for callables)
-  if (baseline.returns && candidate.returns && baseline.returns.name !== candidate.returns.name) {
+  if (
+    baseline.returns &&
+    candidate.returns &&
+    normalizeType(baseline.returns.name, language) !== normalizeType(candidate.returns.name, language)
+  ) {
     changes.push(
       makeChange({
         category: 'return_type_changed',
@@ -137,7 +325,11 @@ export function classifySymbolChanges(
   }
 
   // Field/property type changes
-  if (baseline.typeRef && candidate.typeRef && baseline.typeRef.name !== candidate.typeRef.name) {
+  if (
+    baseline.typeRef &&
+    candidate.typeRef &&
+    normalizeType(baseline.typeRef.name, language) !== normalizeType(candidate.typeRef.name, language)
+  ) {
     changes.push(
       makeChange({
         category: 'field_type_changed',
@@ -182,6 +374,7 @@ function classifyParameterChanges(
   candidate: CompatSymbol,
   policy: CompatPolicyHints,
   specRef?: string,
+  language?: LanguageId,
 ): ClassifiedChange[] {
   const changes: ClassifiedChange[] = [];
   const baseParams = baseline.parameters ?? [];
@@ -246,7 +439,7 @@ function classifyParameterChanges(
     }
 
     // Type narrowed
-    if (baseParam.type.name !== candParam.type.name) {
+    if (normalizeType(baseParam.type.name, language) !== normalizeType(candParam.type.name, language)) {
       changes.push(
         makeChange({
           category: 'parameter_type_narrowed',
