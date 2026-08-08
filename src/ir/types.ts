@@ -198,7 +198,9 @@ export interface Model {
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
   /**
-   * When set, this model is a discriminated union over allOf+oneOf variants.
+   * When set, this model is a discriminated union — either allOf+oneOf
+   * variants, or a standalone oneOf/anyOf schema with an explicit
+   * `discriminator`+`mapping` (e.g. Stripe/GitHub-style tagged unions).
    * Emitters should generate a dispatcher (factory) instead of a regular dataclass.
    * The `property` field is the discriminator key (e.g. "event"), and `mapping`
    * maps each discriminator value to the concrete variant model name.

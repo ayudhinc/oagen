@@ -624,9 +624,46 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet));
   }
 
-  // Pure oneOf/anyOf schemas (no allOf, no properties): merge variant fields
-  // as optional. This handles schemas like UpdateOrganizationMembership which
-  // is a oneOf with mutually exclusive field groups (role_slug vs role_slugs).
+  // Pure oneOf/anyOf schemas (no allOf, no properties). Standalone named
+  // schemas like `PaymentMethod: oneOf: [$ref: Card, $ref: BankTransfer],
+  // discriminator: { propertyName: type, mapping: {...} }` are how most real
+  // specs (Stripe, GitHub) model tagged unions — the dominant pattern, not an
+  // edge case — but until now this branch always fell straight to the merge
+  // below, which for $ref'd variants (no inline `.properties`) skips every
+  // variant and silently produces an empty model, discarding the union
+  // entirely. Honor the spec's own explicit `discriminator` + `mapping` first:
+  // the mapped variants are $ref'd schemas that extractSchemas() already
+  // extracts as their own top-level models (named via the same
+  // resolveSchemaName() used everywhere else), so this only has to resolve
+  // each mapping ref to that existing model name — no new models to build.
+  if (fields.length === 0 && (schema.oneOf || schema.anyOf) && schema.discriminator?.mapping) {
+    const mapping: Record<string, string> = {};
+    for (const [discriminatorValue, ref] of Object.entries(schema.discriminator.mapping)) {
+      const segments = ref.split('/');
+      const refName = segments[segments.length - 1];
+      if (refName) mapping[discriminatorValue] = resolveSchemaName(refName);
+    }
+    if (Object.keys(mapping).length > 0) {
+      return {
+        name,
+        description: schema.description,
+        fields: [],
+        discriminator: { property: schema.discriminator.propertyName, mapping },
+      };
+    }
+  }
+
+  // Fall back: merge variant fields as optional. Handles schemas like
+  // UpdateOrganizationMembership (a oneOf over mutually exclusive field
+  // groups — role_slug vs role_slugs — not a tagged union), and standalone
+  // oneOf/anyOf without an explicit discriminator+mapping (inline variants or
+  // an implicit/const-only discriminator). Detecting and correctly
+  // materializing THAT case as a real discriminated union — mirroring what
+  // extractDiscriminatedAllOfVariantModels() does for the allOf+oneOf
+  // pattern — is real, separate work: naming variants from their const value
+  // means new models need to be constructed, not just referenced, and is
+  // intentionally not attempted here to avoid emitting a discriminator whose
+  // mapping points at models that don't exist.
   if (fields.length === 0 && (schema.oneOf || schema.anyOf)) {
     const variants = schema.oneOf ?? schema.anyOf ?? [];
     const emptyRequired = new Set<string>();

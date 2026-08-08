@@ -238,6 +238,74 @@ describe('extractSchemas', () => {
     });
   });
 
+  it('extracts a standalone oneOf+discriminator as a discriminated union, not an empty model', () => {
+    const schemas = {
+      CardPaymentMethod: {
+        type: 'object' as const,
+        required: ['type', 'last4'],
+        properties: {
+          type: { type: 'string', enum: ['card'] },
+          last4: { type: 'string' },
+        },
+      },
+      BankTransferPaymentMethod: {
+        type: 'object' as const,
+        required: ['type', 'account_last4'],
+        properties: {
+          type: { type: 'string', enum: ['bank_transfer'] },
+          account_last4: { type: 'string' },
+        },
+      },
+      PaymentMethod: {
+        oneOf: [
+          { $ref: '#/components/schemas/CardPaymentMethod' },
+          { $ref: '#/components/schemas/BankTransferPaymentMethod' },
+        ],
+        discriminator: {
+          propertyName: 'type',
+          mapping: {
+            card: '#/components/schemas/CardPaymentMethod',
+            bank_transfer: '#/components/schemas/BankTransferPaymentMethod',
+          },
+        },
+      },
+    };
+
+    const { models } = extractSchemas(schemas);
+
+    const paymentMethod = models.find((m) => m.name === 'PaymentMethod');
+    expect(paymentMethod).toBeDefined();
+    expect(paymentMethod!.fields).toEqual([]);
+    expect(paymentMethod!.discriminator).toEqual({
+      property: 'type',
+      mapping: {
+        card: 'CardPaymentMethod',
+        bank_transfer: 'BankTransferPaymentMethod',
+      },
+    });
+
+    // The $ref'd variants remain their own fully-fielded models — the
+    // discriminator only references them, it doesn't need to (re)construct them.
+    const card = models.find((m) => m.name === 'CardPaymentMethod');
+    expect(card?.fields.map((f) => f.name)).toEqual(['type', 'last4']);
+  });
+
+  it('falls back to merging variant fields when a standalone oneOf has no discriminator mapping', () => {
+    const schemas = {
+      UpdateThing: {
+        oneOf: [
+          { type: 'object' as const, properties: { role_slug: { type: 'string' } } },
+          { type: 'object' as const, properties: { role_slugs: { type: 'array', items: { type: 'string' } } } },
+        ],
+      },
+    };
+
+    const { models } = extractSchemas(schemas);
+    const model = models.find((m) => m.name === 'UpdateThing');
+    expect(model?.discriminator).toBeUndefined();
+    expect(model?.fields.map((f) => f.name).sort()).toEqual(['role_slug', 'role_slugs']);
+  });
+
   it('returns empty for undefined schemas', () => {
     const { models, enums } = extractSchemas(undefined);
     expect(models).toHaveLength(0);
