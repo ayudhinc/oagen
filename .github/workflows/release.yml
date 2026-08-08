@@ -28,5 +28,15 @@ jobs:
       - name: Run Tests
         run: npm run test
 
+      # TEMPORARY: NODE_AUTH_TOKEN bootstraps the first-ever publish of
+      # @gjuta/oagen. Trusted Publishing (OIDC, no stored token) can only be
+      # configured on the package's own npm settings page once the package
+      # exists on the registry -- chicken-and-egg for a brand new scope. Once
+      # this first publish succeeds and Trusted Publishing is configured for
+      # this repo+workflow, remove this env block and the NPM_TOKEN secret;
+      # `id-token: write` above is already sufficient for OIDC-only publishing
+      # after that, matching how this workflow was originally written upstream.
       - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --tag latest --access public --provenance
