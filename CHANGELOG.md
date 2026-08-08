@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.3](https://github.com/ayudhinc/oagen/compare/v0.29.2...v0.29.3) (2026-08-08)
+
+
+### Bug Fixes
+
+* **ci:** use default GITHUB_TOKEN for release-please ([20c43bd](https://github.com/ayudhinc/oagen/commit/20c43bd6156516a5dafb0e68536b0fe9ecd66936))
+* **parser:** resolve standalone oneOf+discriminator to a tagged union instead of an empty model ([c5b037b](https://github.com/ayudhinc/oagen/commit/c5b037b2fe8ddb8f47a4d7fa046a3689a647c844))
+
 ## [0.29.2](https://github.com/workos/oagen/compare/v0.29.1...v0.29.2) (2026-08-06)
 
 
