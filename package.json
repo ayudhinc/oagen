@@ -1,7 +1,7 @@
 {
-  "name": "@gjuta/oagen",
+  "name": "@osmundus/oagen",
   "version": "0.29.3",
-  "description": "Framework for building OpenAPI SDK emitters (fork of @workos/oagen, maintained by Gjuta)",
+  "description": "Framework for building OpenAPI SDK emitters (fork of @workos/oagen, maintained by Osmundus)",
   "author": "WorkOS",
   "license": "MIT",
   "type": "module",
