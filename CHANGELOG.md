@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.4](https://github.com/ayudhinc/oagen/compare/v0.29.3...v0.29.4) (2026-08-16)
+
+
+### Bug Fixes
+
+* **parser:** materialize dangling model refs, suffix name collisions ([b6d10af](https://github.com/ayudhinc/oagen/commit/b6d10af9c03e10ac827c56384072f8ff5d099bec))
+* **parser:** work around a js-yaml bug rejecting a valid empty block scalar ([0f7fcb8](https://github.com/ayudhinc/oagen/commit/0f7fcb877a98e0f31c22ac6465695ac73405bb8e))
+
+
+### Reverts
+
+* drop temporary NODE_AUTH_TOKEN bootstrap ([f72ff0c](https://github.com/ayudhinc/oagen/commit/f72ff0ce82aaefbf21d4e55f4226130d11bbebfb))
+
 ## [0.29.3](https://github.com/ayudhinc/oagen/compare/v0.29.2...v0.29.3) (2026-08-08)
 
 
