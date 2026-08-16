@@ -287,6 +287,14 @@ export function resolveOperations(
   const resolved: ResolvedOperation[] = [];
   const hintMap = hints ?? {};
   const mounts = mountRules ?? {};
+  // Two operations legitimately derive the same method name on the same
+  // mount target -- e.g. GET /v1/foo/{id}/bar and GET /v1/foo/{other_id}/bar
+  // both deriving "get_foo_bar" -- with no hint to disambiguate them. Left
+  // unchecked, every emitter keying methods by (mountOn, name) either
+  // overwrites one silently or fails to compile with a "duplicate member"
+  // error far from its actual cause. Suffixed (never dropped) and warned,
+  // same policy as the schema-name collision handling in parser/schemas.ts.
+  const claimedMethodNames = new Map<string, string>(); // "mountOn\0name" -> op.name that claimed it
 
   for (const service of spec.services) {
     for (const op of service.operations) {
@@ -294,10 +302,26 @@ export function resolveOperations(
       const hint = hintMap[key];
 
       // Resolve method name: hint > algorithm
-      const methodName = hint?.name ?? deriveMethodName(op, service);
+      let methodName = hint?.name ?? deriveMethodName(op, service);
 
       // Resolve mount target: per-op hint > service mount rule > original service
       const mountOn = hint?.mountOn ?? resolveMountTarget(service.name, mounts);
+
+      const claimKey = (name: string) => `${mountOn}\0${name}`;
+      const claimedBy = claimedMethodNames.get(claimKey(methodName));
+      if (claimedBy !== undefined) {
+        let n = 2;
+        let candidate = `${methodName}_${n}`;
+        while (claimedMethodNames.has(claimKey(candidate))) {
+          n++;
+          candidate = `${methodName}_${n}`;
+        }
+        console.warn(
+          `[oagen] Warning: operations "${claimedBy}" and "${op.name}" both resolve to method "${methodName}" on ${mountOn} -- the second is emitted as "${candidate}". Set an operationHints name for a cleaner method name.`,
+        );
+        methodName = candidate;
+      }
+      claimedMethodNames.set(claimKey(methodName), op.name);
 
       // Build wrappers for split operations
       let wrappers: ResolvedWrapper[] | undefined;

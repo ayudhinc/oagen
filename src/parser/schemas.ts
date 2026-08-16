@@ -24,8 +24,32 @@ let activeSchemaNameTransform: ((name: string) => string) | null = null;
  */
 let activeEnumSchemaNames: Set<string> = new Set();
 
+/**
+ * Module-level map of raw component-schema key -> disambiguated PascalCase
+ * name, populated by extractSchemas() BEFORE any resolution happens whenever
+ * two distinct raw keys clean to the identical name (e.g. "my-widget" and
+ * "MyWidget" both -> "MyWidget"). Consulted first by resolveSchemaName() so
+ * every call site -- $ref targets, discriminator mappings, the main
+ * extraction loop -- agrees on the same name for a given raw key.
+ *
+ * Without this, extractSchemas()'s own per-schema loop discovered the
+ * collision only when it went to insert the SECOND model into
+ * modelsByCleanName, by which point every other resolveSchemaName(rawName)
+ * call for that key (already made while resolving $ref targets and
+ * discriminator mappings on OTHER schemas) had already returned the
+ * colliding plain name -- so even a same-loop rename couldn't retroactively
+ * fix references already baked into other models' fields. Raw component keys
+ * are globally unique (they're object keys in components.schemas), so
+ * disambiguating by raw key -- computed up front, before extraction starts
+ * to read/resolve anything -- is the only way to keep every reference site
+ * consistent.
+ */
+let activeSchemaNameOverrides: Map<string, string> | null = null;
+
 /** Apply cleanSchemaName + the active transform (if any) to a raw schema name. */
 export function resolveSchemaName(rawName: string): string {
+  const override = activeSchemaNameOverrides?.get(rawName);
+  if (override) return override;
   let name = cleanSchemaName(toPascalCase(rawName));
   if (activeSchemaNameTransform) name = activeSchemaNameTransform(name);
   return name;
@@ -95,6 +119,44 @@ export function extractSchemas(
     activeSchemaNameTransform = null;
   }
 
+  // Pre-compute disambiguated names for raw schema keys that collide after
+  // cleanSchemaName(toPascalCase(...)) alone -- e.g. "my-widget" and
+  // "MyWidget" both clean to "MyWidget". Must run before ANY resolveSchemaName()
+  // call below (including the enum-name pass immediately after this block),
+  // so every reference site -- $ref targets, discriminator mappings, the
+  // main extraction loop -- agrees on the same disambiguated name for a
+  // given raw key. Declaration order (Object.keys order, i.e. document
+  // order) decides which raw key keeps the plain name; every later
+  // colliding key gets a deterministic numeric suffix.
+  {
+    const rawNames = Object.keys(schemas);
+    const rawKeysByCleanName = new Map<string, string[]>();
+    for (const raw of rawNames) {
+      const clean = cleanSchemaName(toPascalCase(raw));
+      if (!rawKeysByCleanName.has(clean)) rawKeysByCleanName.set(clean, []);
+      rawKeysByCleanName.get(clean)!.push(raw);
+    }
+    const claimed = new Set(rawKeysByCleanName.keys());
+    const overrides = new Map<string, string>();
+    for (const [clean, raws] of rawKeysByCleanName) {
+      if (raws.length <= 1) continue;
+      for (let i = 1; i < raws.length; i++) {
+        let n = 2;
+        let candidate = `${clean}_${n}`;
+        while (claimed.has(candidate)) {
+          n++;
+          candidate = `${clean}_${n}`;
+        }
+        claimed.add(candidate);
+        overrides.set(raws[i], candidate);
+        console.warn(
+          `[oagen] Warning: schema "${raws[i]}" cleans to the same name ("${clean}") as schema "${raws[0]}" -- emitted as "${candidate}" so neither is silently dropped. Rename one of the source schemas for a cleaner name.`,
+        );
+      }
+    }
+    activeSchemaNameOverrides = overrides.size > 0 ? overrides : null;
+  }
+
   // Pre-compute the set of resolved names whose component schema is an enum so
   // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
   // pass because the per-schema loop mutates models/enums and we want this map
@@ -107,32 +169,42 @@ export function extractSchemas(
 
   const modelsByCleanName = new Map<string, Model>();
 
+  // Registers `model` under its own name, unless that name is already taken
+  // -- in which case it's suffixed (never dropped) and a warning names both
+  // parties. The top-level declared-schema case can no longer actually
+  // collide here (the override pass above already disambiguates every raw
+  // component key up front), but a discriminator-derived inline variant
+  // name is synthesized separately and can still land on a name a top-level
+  // schema (or another inline variant) already claimed -- this is the
+  // remaining, narrower case this defends against.
+  function registerModel(model: Model): void {
+    const existing = modelsByCleanName.get(model.name);
+    if (!existing) {
+      modelsByCleanName.set(model.name, model);
+      return;
+    }
+    let n = 2;
+    let candidate = `${model.name}_${n}`;
+    while (modelsByCleanName.has(candidate)) {
+      n++;
+      candidate = `${model.name}_${n}`;
+    }
+    console.warn(
+      `[oagen] Warning: schema "${model.name}" collides with another schema of the same resolved name -- emitted as "${candidate}" so neither is silently dropped. Rename one of the source schemas for a cleaner name.`,
+    );
+    model.name = candidate;
+    modelsByCleanName.set(candidate, model);
+  }
+
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = resolveSchemaName(name);
 
     if (schema.enum) {
       enums.push(extractEnum(pascalName, schema));
     } else {
-      const model = extractModel(pascalName, schema, schemas);
-      const existing = modelsByCleanName.get(pascalName);
-      if (existing) {
-        // Keep the model with more fields when names collide after cleaning
-        if (model.fields.length > existing.fields.length) {
-          modelsByCleanName.set(pascalName, model);
-        }
-      } else {
-        modelsByCleanName.set(pascalName, model);
-      }
-
+      registerModel(extractModel(pascalName, schema, schemas));
       for (const inlineModel of extractDiscriminatedAllOfVariantModels(schema, pascalName)) {
-        const existingInline = modelsByCleanName.get(inlineModel.name);
-        if (existingInline) {
-          if (inlineModel.fields.length > existingInline.fields.length) {
-            modelsByCleanName.set(inlineModel.name, inlineModel);
-          }
-        } else {
-          modelsByCleanName.set(inlineModel.name, inlineModel);
-        }
+        registerModel(inlineModel);
       }
     }
   }
@@ -233,7 +305,7 @@ function collectNestedInlineModels(
       if (!fieldSchema) return;
 
       // Extract inline models from the field schema
-      const extracted = extractNestedSchema(modelRef.name, fieldSchema);
+      const extracted = extractNestedSchema(modelRef.name, fieldSchema, schemas);
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
           models.push(m);
@@ -292,7 +364,27 @@ function findNestedFieldSchema(
 }
 
 /** Extract a model (and nested models) from an inline field schema. */
-function extractNestedSchema(name: string, schema: SchemaObject): Model[] {
+function extractNestedSchema(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
+  // Handle allOf: a `$ref` augmented with sibling properties (e.g.
+  // `allOf: [{ $ref: '#/components/schemas/Foo' }, { properties: { extra... } }]`)
+  // is exactly the shape schemaToTypeRef() promises a merged model for
+  // (schemaToTypeRef's own `hasAugmentation` branch, above) -- but until
+  // this branch existed, NOTHING actually materialized that model: this
+  // function had no allOf handling at all, so it fell through every check
+  // below and returned []. The caller (collectNestedInlineModels) then had
+  // a TypeRef pointing at a model name that was never added to `models`,
+  // which normalize-model-refs.ts's validateModelRefs correctly flags as
+  // "Unresolved model reference" -- confirmed as the root cause of exactly
+  // that warning on a real large spec (554 occurrences on Stripe's
+  // published spec). extractAllOfModel already does the right merge (both
+  // $ref-resolved and inline sub-schemas, nested allOf/oneOf/anyOf,
+  // discriminator detection) for the exact same shape when it appears as a
+  // top-level component schema -- reused here instead of duplicating that
+  // logic for the field-level case.
+  if (schema.allOf) {
+    return [extractAllOfModel(name, schema, schemas)];
+  }
+
   // Handle oneOf: extract each object variant as its own model
   if (schema.oneOf) {
     const models: Model[] = [];

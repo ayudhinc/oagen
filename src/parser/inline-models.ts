@@ -76,6 +76,33 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       }
     }
 
+    // Inline object VALUE type for a dictionary/map field
+    // (`additionalProperties: { properties: ... }`, e.g. Stripe's
+    // `currency_options: { additionalProperties: { properties: { amount_off... } } }`
+    // -- a `Record<CurrencyCode, CurrencyOption>`-shaped field). schemaToTypeRef's
+    // own map-handling branch resolves the value type via
+    // `schemaToTypeRef(schema.additionalProperties, contextName)` --
+    // deliberately called WITHOUT a parentModelName, so the promised model
+    // name is unqualified (field-derived only, e.g. "CurrencyOptions", not
+    // prefixed by the enclosing request/model name the way every other case
+    // in this function is) -- matched here exactly rather than qualified,
+    // or the materialized model wouldn't have the name the reference
+    // actually points at.
+    if (
+      fieldSchema.type === 'object' &&
+      !fieldSchema.properties &&
+      typeof fieldSchema.additionalProperties === 'object'
+    ) {
+      const valueSchema = fieldSchema.additionalProperties as SchemaObject;
+      if (valueSchema.properties && (valueSchema.type === 'object' || !valueSchema.type)) {
+        const modelName = toPascalCase(fieldName);
+        if (!results.some((r) => r.name === modelName)) {
+          results.push(buildInlineModel(modelName, valueSchema));
+          extractInlineModelsFromProperties(valueSchema, results, modelName);
+        }
+      }
+    }
+
     // Inline object expressed via `allOf` (no $ref / oneOf / anyOf members).
     // schemaToTypeRef collapses such a field into a single merged model ref, so
     // materialize that model — otherwise the ref dangles exactly like a direct
@@ -91,31 +118,66 @@ export function extractInlineModelsFromProperties(schema: SchemaObject, results:
       }
     }
 
-    // oneOf containing objects — extract every inline object variant as a
-    // model so each gets its own typed class. Variant 0 keeps the bare
+    // oneOf/anyOf containing objects — extract every inline object variant as
+    // a model so each gets its own typed class. Variant 0 keeps the bare
     // qualified inline name (e.g. `ApiKeyCreatedDataOwner`); subsequent
     // variants are prefixed by their const-discriminator value via
     // `nameOneOfVariant` (e.g. `UserApiKeyCreatedDataOwner`). When the
-    // oneOf doesn't have a const-discriminator (single object variant + null
+    // union doesn't have a const-discriminator (single object variant + null
     // for nullable, or single object variant only), only variant 0 is
     // extracted and the bare name pattern preserves backward compat.
-    if (fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter(
-        (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
-      );
+    //
+    // anyOf is handled identically to oneOf here (same variant-naming
+    // helpers, unaware of which composition keyword produced them) --
+    // schemaToTypeRef's own union-building code (schemas.ts) treats the two
+    // structurally the same way for variant TypeRef construction, so a field
+    // whose schema is `anyOf: [{properties:...}, {type:'string'}]` (a real,
+    // common Stripe request-body pattern: "either a structured object or a
+    // plain token") gets the exact same promised model name either way.
+    // Before this handled anyOf, that promise was never materialized here --
+    // ONLY the oneOf case was -- so any anyOf-with-inline-object-variant
+    // field left a dangling model reference. Confirmed as the dominant real
+    // cause of oagen's own "Unresolved model reference" warning on a real
+    // large spec (554 of 554 occurrences on Stripe's published spec traced
+    // to this exact anyOf shape, none to the oneOf case this already handled).
+    const unionVariants = fieldSchema.oneOf ?? fieldSchema.anyOf;
+    if (unionVariants) {
+      // A variant can itself be `{ type: 'array', items: { properties... } }`
+      // -- "either a list of structured objects, or a plain string/enum" is
+      // a real, common Stripe pattern (e.g. a `products` field: array of
+      // product-selector objects, or the literal empty-string sentinel).
+      // schemaToTypeRef's array branch resolves such a variant by recursing
+      // into `items` with the SAME contextName/parentModelName as the field
+      // itself, so the promised model name comes from the field name exactly
+      // as the direct-object case does (qualifyInlineModelName's own
+      // singularization then turns "Products" into "...Product"); the
+      // object shape to extract fields/nested models from is `items`, not
+      // the array wrapper.
+      const objectShapeOf = (v: SchemaObject): SchemaObject | null =>
+        v.properties && (v.type === 'object' || !v.type)
+          ? v
+          : v.type === 'array' && v.items?.properties
+            ? v.items
+            : null;
+
+      const inlineObjectVariants = unionVariants
+        .filter((v) => !v.$ref)
+        .map((v) => ({ variant: v, shape: objectShapeOf(v) }))
+        .filter((entry): entry is { variant: SchemaObject; shape: SchemaObject } => entry.shape !== null);
+
       if (inlineObjectVariants.length > 0) {
         const baseName = toPascalCase(fieldName);
         const modelName = qualifyInlineModelName(baseName, parentName);
         const existingNames = new Set(results.map((r) => r.name));
-        const namingDiscProp = deriveOneOfNamingDiscriminator(inlineObjectVariants);
+        const namingDiscProp = deriveOneOfNamingDiscriminator(inlineObjectVariants.map((e) => e.shape));
         const emittedNames: string[] = [];
-        for (const variant of inlineObjectVariants) {
-          const variantName = nameOneOfVariant(variant, modelName, emittedNames, namingDiscProp);
+        for (const { shape } of inlineObjectVariants) {
+          const variantName = nameOneOfVariant(shape, modelName, emittedNames, namingDiscProp);
           emittedNames.push(variantName);
           if (!existingNames.has(variantName)) {
             existingNames.add(variantName);
-            results.push(buildInlineModel(variantName, variant));
-            extractInlineModelsFromProperties(variant, results, variantName);
+            results.push(buildInlineModel(variantName, shape));
+            extractInlineModelsFromProperties(shape, results, variantName);
           }
         }
       }

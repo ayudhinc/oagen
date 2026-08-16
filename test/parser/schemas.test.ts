@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { extractSchemas, schemaToTypeRef } from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix handling', () => {
@@ -532,6 +532,52 @@ describe('schemaToTypeRef', () => {
     expect(ref).toEqual({ kind: 'model', name: 'BaseModel' });
   });
 
+  it('a field whose schema is $ref+augmentation allOf actually materializes the merged model extractSchemas() promised, not just a dangling reference', () => {
+    // schemaToTypeRef's own "allOf with $ref and augmentation" case above
+    // promises a model named "MyField" exists -- this confirms extractSchemas()
+    // actually adds it to `models`, with BOTH the $ref'd base schema's fields
+    // AND the augmentation's own field merged in. Before this fix, nothing
+    // materialized this model at all: the field's type pointed at a model
+    // name extractSchemas() never added to `models`, which
+    // normalize-model-refs.ts's validateModelRefs flags as "Unresolved
+    // model reference" -- confirmed as the root cause of exactly that
+    // warning on a real large spec (554 occurrences on Stripe's published
+    // spec).
+    const { models } = extractSchemas({
+      BaseModel: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      },
+      Container: {
+        type: 'object',
+        properties: {
+          myField: {
+            allOf: [
+              { $ref: '#/components/schemas/BaseModel' },
+              { type: 'object', properties: { extra: { type: 'string' } } },
+            ],
+          },
+        },
+      },
+    });
+
+    const container = models.find((m) => m.name === 'Container')!;
+    // qualifyInlineModelName prefixes the parent model name when extracting
+    // via the full extractSchemas() path (contextName = field name,
+    // parentModelName = "Container") -- "ContainerMyField", not the bare
+    // "MyField" the narrower schemaToTypeRef-only test above gets (it never
+    // passes a parentModelName).
+    expect(container.fields[0].type).toEqual({ kind: 'model', name: 'ContainerMyField' });
+
+    const merged = models.find((m) => m.name === 'ContainerMyField');
+    expect(
+      merged,
+      `expected a materialized "ContainerMyField" model in: ${models.map((m) => m.name).join(', ')}`,
+    ).toBeDefined();
+    expect(merged!.fields.map((f) => f.name).sort()).toEqual(['extra', 'id']);
+  });
+
   it('discriminator mapping strips #/components/schemas/ prefix', () => {
     const ref = schemaToTypeRef({
       oneOf: [
@@ -586,5 +632,84 @@ describe('schemaToTypeRef', () => {
     if (ref.kind === 'nullable') {
       expect(ref.inner.kind).not.toBe('nullable');
     }
+  });
+});
+
+describe('extractSchemas – name-collision handling (never drop, always suffix + warn)', () => {
+  it('disambiguates two raw schema keys that clean to the identical name, keeping both models', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models } = extractSchemas({
+      'my-widget': { type: 'object', properties: { a: { type: 'string' } } },
+      MyWidget: { type: 'object', properties: { b: { type: 'string' } }, required: ['b'] },
+    });
+    warnSpy.mockRestore();
+
+    expect(models).toHaveLength(2);
+    const names = models.map((m) => m.name).sort();
+    expect(names).toEqual(['MyWidget', 'MyWidget_2']);
+    // Declaration order (Object.keys order) decides which raw key keeps the
+    // plain name -- "my-widget" is declared first, so it keeps "MyWidget";
+    // "MyWidget" (declared second) is the one suffixed.
+    const first = models.find((m) => m.name === 'MyWidget')!;
+    const second = models.find((m) => m.name === 'MyWidget_2')!;
+    expect(first.fields.map((f) => f.name)).toEqual(['a']);
+    expect(second.fields.map((f) => f.name)).toEqual(['b']);
+  });
+
+  it('warns naming both colliding schemas and the emitted suffix', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    extractSchemas({
+      'my-widget': { type: 'object', properties: { a: { type: 'string' } } },
+      MyWidget: { type: 'object', properties: { b: { type: 'string' } } },
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('schema "MyWidget" cleans to the same name ("MyWidget") as schema "my-widget"'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('keeps a $ref to the disambiguated schema pointing at the correct (suffixed) model, not the wrong one', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models } = extractSchemas({
+      'my-widget': { type: 'object', properties: { a: { type: 'string' } } },
+      MyWidget: { type: 'object', properties: { b: { type: 'string' } } },
+      Holder: {
+        type: 'object',
+        properties: { second: { $ref: '#/components/schemas/MyWidget' } },
+      },
+    });
+    warnSpy.mockRestore();
+
+    const holder = models.find((m) => m.name === 'Holder')!;
+    const ref = holder.fields.find((f) => f.name === 'second')!.type;
+    // The $ref's raw target key is "MyWidget" (the SECOND declared key,
+    // which got suffixed to "MyWidget_2") -- the reference must follow it
+    // there, not resolve to the plain "MyWidget" that a different raw key
+    // ("my-widget") actually owns.
+    expect(ref).toEqual({ kind: 'model', name: 'MyWidget_2' });
+  });
+
+  it('resolves three-way collisions to distinct, deterministic names', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models } = extractSchemas({
+      Widget: { type: 'object', properties: { a: { type: 'string' } } },
+      widget: { type: 'object', properties: { b: { type: 'string' } } },
+      WIDGET: { type: 'object', properties: { c: { type: 'string' } } },
+    });
+    warnSpy.mockRestore();
+
+    expect(models.map((m) => m.name).sort()).toEqual(['Widget', 'Widget_2', 'Widget_3']);
+  });
+
+  it('does not touch schemas whose names do not collide', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models } = extractSchemas({
+      Widget: { type: 'object', properties: { a: { type: 'string' } } },
+      Gadget: { type: 'object', properties: { b: { type: 'string' } } },
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+
+    expect(models.map((m) => m.name).sort()).toEqual(['Gadget', 'Widget']);
   });
 });

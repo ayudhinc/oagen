@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { deriveMethodName, resolveMountTarget, resolveOperations } from '../../src/ir/operation-hints.js';
 import type { OperationHint } from '../../src/ir/operation-hints.js';
 import type { ApiSpec, Service, Operation, HttpMethod } from '../../src/ir/types.js';
@@ -385,6 +385,99 @@ describe('resolveOperations', () => {
     const resolved = resolveOperations(s);
     expect(resolved[0].defaults).toEqual({});
     expect(resolved[0].inferFromClient).toEqual([]);
+  });
+
+  describe('method-name collisions on the same mount (never drop, always suffix + warn)', () => {
+    it('suffixes the second operation when two derive the same method name on the same mount', () => {
+      // GET /projects/{id}/roles and GET /projects/{other_id}/roles both
+      // derive "list_project_roles" -- a real shape (two different
+      // single-path-param endpoints under the same resource) with nothing
+      // to naturally disambiguate them.
+      const s = spec([
+        svc('Projects', [
+          op('get', '/projects/{id}/roles', 'listRolesForProject'),
+          op('get', '/projects/{other_id}/roles', 'listRolesForOtherProject'),
+        ]),
+      ]);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const resolved = resolveOperations(s);
+      warnSpy.mockRestore();
+
+      expect(resolved).toHaveLength(2);
+      expect(resolved[0].methodName).toBe('list_project_roles');
+      expect(resolved[1].methodName).toBe('list_project_roles_2');
+    });
+
+    it('warns naming both operations, the shared method name, the mount, and the suffix', () => {
+      const s = spec([
+        svc('Projects', [
+          op('get', '/projects/{id}/roles', 'listRolesForProject'),
+          op('get', '/projects/{other_id}/roles', 'listRolesForOtherProject'),
+        ]),
+      ]);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      resolveOperations(s);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'operations "listRolesForProject" and "listRolesForOtherProject" both resolve to method "list_project_roles" on Projects -- the second is emitted as "list_project_roles_2"',
+        ),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not collide across different mounts even with the identical derived name', () => {
+      const s = spec([
+        svc('Projects', [op('get', '/projects/{id}/roles', 'a')]),
+        svc('Teams', [op('get', '/teams/{id}/roles', 'b')]),
+      ]);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const resolved = resolveOperations(s);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+
+      expect(resolved[0].methodName).toBe('list_project_roles');
+      expect(resolved[1].methodName).toBe('list_team_roles');
+    });
+
+    it('resolves three-way collisions to distinct, deterministic suffixes', () => {
+      const s = spec([
+        svc('Projects', [
+          op('get', '/projects/{a}/roles', 'x'),
+          op('get', '/projects/{b}/roles', 'y'),
+          op('get', '/projects/{c}/roles', 'z'),
+        ]),
+      ]);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const resolved = resolveOperations(s);
+      warnSpy.mockRestore();
+
+      expect(resolved.map((r) => r.methodName)).toEqual([
+        'list_project_roles',
+        'list_project_roles_2',
+        'list_project_roles_3',
+      ]);
+    });
+
+    it('an explicit name hint on the colliding operation avoids the collision (and the warning) entirely', () => {
+      const s = spec([
+        svc('Projects', [op('get', '/projects/{id}/roles', 'a'), op('get', '/projects/{other_id}/roles', 'b')]),
+      ]);
+      const hints: Record<string, OperationHint> = {
+        'GET /projects/{other_id}/roles': { name: 'list_roles_for_other_project' },
+      };
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const resolved = resolveOperations(s, hints);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+
+      expect(resolved[0].methodName).toBe('list_project_roles');
+      expect(resolved[1].methodName).toBe('list_roles_for_other_project');
+    });
   });
 });
 
