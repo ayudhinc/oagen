@@ -188,6 +188,43 @@ describe('extractSchemas', () => {
     expect(models[0].fields[1].required).toBe(true);
   });
 
+  it('a later allOf member redeclaring a property overrides the earlier one, in place -- not a duplicate field', () => {
+    // Real OpenAI pattern (CreateChatCompletionRequest = allOf[
+    // CreateModelResponseProperties (top_logprobs, integer, min 0 max 100),
+    // an inline override (top_logprobs, integer, min 0 max 20, nullable)]):
+    // allOf-as-base-plus-narrowing-override, where the LATER, more specific
+    // declaration is the one actually meant to apply. Before this fix both
+    // landed as separate same-named Field entries in `fields`.
+    const schemas = {
+      Member: {
+        allOf: [
+          {
+            type: 'object' as const,
+            properties: {
+              id: { type: 'string' },
+              limit: { type: 'integer', description: 'base: unbounded' },
+            },
+          },
+          {
+            type: 'object' as const,
+            properties: {
+              limit: { type: 'integer', nullable: true, description: 'override: 0-20' },
+            },
+          },
+        ],
+      },
+    };
+
+    const { models } = extractSchemas(schemas);
+    expect(models).toHaveLength(1);
+    // Exactly one "limit" field -- not two -- and it kept its ORIGINAL
+    // position (right after "id"), with the override's description/shape.
+    expect(models[0].fields.map((f) => f.name)).toEqual(['id', 'limit']);
+    const limit = models[0].fields.find((f) => f.name === 'limit')!;
+    expect(limit.description).toBe('override: 0-20');
+    expect(limit.type).toEqual({ kind: 'nullable', inner: { kind: 'primitive', type: 'integer' } });
+  });
+
   it('extracts discriminated allOf oneOf variants as additional models', () => {
     const schemas = {
       EventSchema: {

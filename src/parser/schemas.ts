@@ -826,6 +826,32 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   const requiredSet = new Set<string>();
   let resultDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
 
+  // Field-name -> index in `fields`, so a later allOf member's redeclaration
+  // of a property already added by an earlier member OVERRIDES it in place
+  // (same position, latest declaration's type/constraints) instead of both
+  // surviving as separate same-named fields. A real, common OpenAPI pattern
+  // (confirmed on OpenAI's real spec: CreateChatCompletionRequest = allOf[
+  // CreateModelResponseProperties (declares top_logprobs, min 0 max 100),
+  // an inline override (redeclares top_logprobs, min 0 max 20)]) uses allOf
+  // as base-schema-plus-narrowing-override — the later, more specific
+  // declaration is the one actually meant to apply. Without this, both
+  // landed as separate Field entries with the identical name, a genuine
+  // duplicate the TS/Python emitters could only patch around downstream
+  // (keep-first-declaration, warn). This does NOT apply to the oneOf/anyOf
+  // variant-flattening branch below — those variants are mutually
+  // exclusive alternatives, not layered overrides, so keeping the first
+  // variant's field for a given name is the correct behavior there.
+  const fieldIndexByName = new Map<string, number>();
+  const upsertField = (field: Field): void => {
+    const existingIndex = fieldIndexByName.get(field.name);
+    if (existingIndex !== undefined) {
+      fields[existingIndex] = field;
+    } else {
+      fieldIndexByName.set(field.name, fields.length);
+      fields.push(field);
+    }
+  };
+
   for (const subSchema of schema.allOf ?? []) {
     // Resolve $ref sub-schemas by looking up the referenced component schema
     let resolved = subSchema;
@@ -841,7 +867,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     if (resolved.allOf) {
       const nested = extractAllOfModel(name, resolved, schemas);
       for (const f of nested.fields) {
-        fields.push({ ...f, required: false }); // will be re-set below
+        upsertField({ ...f, required: false }); // will be re-set below
         if (f.required) requiredSet.add(f.name);
       }
     } else if (resolved.oneOf || resolved.anyOf) {
@@ -858,13 +884,18 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         // fields. This handles the common allOf + oneOf pattern where the spec
         // uses mutually exclusive variant groups (e.g. password vs password_hash).
         const emptyRequired = new Set<string>();
-        const seenFieldNames = new Set(fields.map((f) => f.name));
+        // Local to this variant-flattening pass only (mutually exclusive
+        // variants keep the FIRST variant's field for a shared name, unlike
+        // upsertField's override semantics below) — seeded from fields
+        // already present so a variant can't shadow an earlier allOf
+        // member's field either.
+        const seenFieldNames = new Set(fieldIndexByName.keys());
         for (const variant of variants) {
           if (!variant.properties) continue;
           for (const [fieldName, fieldSchema] of Object.entries(variant.properties)) {
             if (!fieldSchema || seenFieldNames.has(fieldName)) continue;
             seenFieldNames.add(fieldName);
-            fields.push(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
+            upsertField(buildFieldFromSchema(fieldName, fieldSchema as SchemaObject, name, emptyRequired));
           }
         }
         // Do NOT add variant-level required to the requiredSet — these fields
@@ -880,7 +911,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
         const emptyRequired = new Set<string>();
         for (const [fieldName, fieldSchema] of Object.entries(resolved.properties)) {
           if (!fieldSchema) continue;
-          fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired));
+          upsertField(buildFieldFromSchema(fieldName, fieldSchema, name, emptyRequired));
         }
       }
     }
