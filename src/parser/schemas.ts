@@ -127,7 +127,13 @@ export function extractSchemas(
   // main extraction loop -- agrees on the same disambiguated name for a
   // given raw key. Declaration order (Object.keys order, i.e. document
   // order) decides which raw key keeps the plain name; every later
-  // colliding key gets a deterministic numeric suffix.
+  // colliding key gets a deterministic numeric suffix -- EXCEPT a model/enum
+  // collision (one colliding raw key has `enum:`, another doesn't), which
+  // gets the conventional `${clean}Enum` name regardless of declaration
+  // order: a model and an enum sharing a name after casing is a common,
+  // specific shape (Stripe/GitHub/OpenAI all do this), and callers expect
+  // the model to keep the plain name with the enum disambiguated, not
+  // whichever happened to be declared first.
   {
     const rawNames = Object.keys(schemas);
     const rawKeysByCleanName = new Map<string, string[]>();
@@ -138,9 +144,36 @@ export function extractSchemas(
     }
     const claimed = new Set(rawKeysByCleanName.keys());
     const overrides = new Map<string, string>();
-    for (const [clean, raws] of rawKeysByCleanName) {
-      if (raws.length <= 1) continue;
-      for (let i = 1; i < raws.length; i++) {
+    for (const [clean, allRaws] of rawKeysByCleanName) {
+      if (allRaws.length <= 1) continue;
+      const enumRaws = allRaws.filter((r) => !!schemas[r]?.enum);
+      const nonEnumRaws = allRaws.filter((r) => !schemas[r]?.enum);
+      if (enumRaws.length > 0 && nonEnumRaws.length > 0) {
+        for (const enumRaw of enumRaws) {
+          let candidate = `${clean}Enum`;
+          while (claimed.has(candidate)) candidate += '_';
+          claimed.add(candidate);
+          overrides.set(enumRaw, candidate);
+          console.warn(
+            `[oagen] Warning: schema "${enumRaw}" (enum) cleans to the same name ("${clean}") as schema "${nonEnumRaws[0]}" -- emitted as "${candidate}" so neither is silently dropped.`,
+          );
+        }
+        for (let i = 1; i < nonEnumRaws.length; i++) {
+          let n = 2;
+          let candidate = `${clean}_${n}`;
+          while (claimed.has(candidate)) {
+            n++;
+            candidate = `${clean}_${n}`;
+          }
+          claimed.add(candidate);
+          overrides.set(nonEnumRaws[i], candidate);
+          console.warn(
+            `[oagen] Warning: schema "${nonEnumRaws[i]}" cleans to the same name ("${clean}") as schema "${nonEnumRaws[0]}" -- emitted as "${candidate}" so neither is silently dropped. Rename one of the source schemas for a cleaner name.`,
+          );
+        }
+        continue;
+      }
+      for (let i = 1; i < allRaws.length; i++) {
         let n = 2;
         let candidate = `${clean}_${n}`;
         while (claimed.has(candidate)) {
@@ -148,9 +181,9 @@ export function extractSchemas(
           candidate = `${clean}_${n}`;
         }
         claimed.add(candidate);
-        overrides.set(raws[i], candidate);
+        overrides.set(allRaws[i], candidate);
         console.warn(
-          `[oagen] Warning: schema "${raws[i]}" cleans to the same name ("${clean}") as schema "${raws[0]}" -- emitted as "${candidate}" so neither is silently dropped. Rename one of the source schemas for a cleaner name.`,
+          `[oagen] Warning: schema "${allRaws[i]}" cleans to the same name ("${clean}") as schema "${allRaws[0]}" -- emitted as "${candidate}" so neither is silently dropped. Rename one of the source schemas for a cleaner name.`,
         );
       }
     }

@@ -712,4 +712,28 @@ describe('extractSchemas – name-collision handling (never drop, always suffix 
 
     expect(models.map((m) => m.name).sort()).toEqual(['Gadget', 'Widget']);
   });
+
+  it('gives a model/enum collision the conventional "Enum" suffix, not a numeric one -- and keeps the model plain regardless of declaration order', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models, enums } = extractSchemas({
+      Network: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      network: { type: 'string', enum: ['visa', 'mastercard'] },
+    });
+    warnSpy.mockRestore();
+
+    expect(models.map((m) => m.name)).toEqual(['Network']);
+    expect(enums.map((e) => e.name)).toEqual(['NetworkEnum']);
+  });
+
+  it('gives the enum the "Enum" suffix even when the enum is declared BEFORE the colliding model', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { models, enums } = extractSchemas({
+      network: { type: 'string', enum: ['visa', 'mastercard'] },
+      Network: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    });
+    warnSpy.mockRestore();
+
+    expect(models.map((m) => m.name)).toEqual(['Network']);
+    expect(enums.map((e) => e.name)).toEqual(['NetworkEnum']);
+  });
 });
