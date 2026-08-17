@@ -522,12 +522,13 @@ function buildOperation(
   // Use the service name as context so inline parameter enums get qualified
   // names. e.g., service "Auth" + param "provider" → "AuthProvider".
   const opContext = serviceName;
-  const pathParams = extractParams(allParams, 'path', opContext, componentSchemas);
-  const queryParams = extractParams(allParams, 'query', opContext, componentSchemas);
-  const headerParams = extractParams(allParams, 'header', opContext, componentSchemas).filter(
+  const paramInlineModels: Model[] = [];
+  const pathParams = extractParams(allParams, 'path', opContext, componentSchemas, paramInlineModels);
+  const queryParams = extractParams(allParams, 'query', opContext, componentSchemas, paramInlineModels);
+  const headerParams = extractParams(allParams, 'header', opContext, componentSchemas, paramInlineModels).filter(
     (p) => p.name.toLowerCase() !== 'idempotency-key',
   );
-  const cookieParams = extractParams(allParams, 'cookie', opContext, componentSchemas);
+  const cookieParams = extractParams(allParams, 'cookie', opContext, componentSchemas, paramInlineModels);
 
   const reqBodyModels: Model[] = [];
   const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(op.requestBody, op, reqBodyModels);
@@ -540,7 +541,7 @@ function buildOperation(
     dataPath: responseDataPath,
     itemType: responseItemType,
   } = extractResponses(op.responses, op, path, method, componentSchemas);
-  inlineModels.push(...reqBodyModels);
+  inlineModels.push(...reqBodyModels, ...paramInlineModels);
 
   // Build structured pagination metadata from response classification and query param detection
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
@@ -631,25 +632,47 @@ function extractParams(
   location: 'path' | 'query' | 'header' | 'cookie',
   operationContext?: string,
   componentSchemas?: Record<string, SchemaObject>,
+  inlineModels?: Model[],
 ): Parameter[] {
-  return params
-    .filter((p) => p.in === location)
-    .map((p) => {
-      const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
-      return {
-        name: p.name,
-        type: p.schema
-          ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
-          : ({ kind: 'primitive', type: 'string' } as TypeRef),
-        required: p.required ?? false,
-        description: p.description,
-        deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
-        default: p.schema?.default ?? refTarget?.default,
-        example: p.example ?? p.schema?.example ?? refTarget?.example,
-        style: p.style as Parameter['style'],
-        explode: p.explode,
-      };
-    });
+  const located = params.filter((p) => p.in === location);
+
+  // schemaToTypeRef() below promises a model name for a param schema shaped
+  // like an inline object, or an anyOf/oneOf with an inline-object variant --
+  // e.g. a query param whose schema is `anyOf: [{properties:...}, {type:
+  // 'string'}]` (a real Stripe pattern on filter-style query params). Unlike
+  // request-body fields, no one materializes that promised model for
+  // parameters, so the reference dangles. Treat every param's schema as a
+  // synthetic object field (same shape extractInlineModelsFromProperties
+  // already handles for request bodies/component schemas) so the promised
+  // name and the materialized model agree here too.
+  if (inlineModels) {
+    const paramProperties: Record<string, SchemaObject> = {};
+    for (const p of located) if (p.schema) paramProperties[p.name] = p.schema;
+    if (Object.keys(paramProperties).length > 0) {
+      extractInlineModelsFromProperties(
+        { properties: paramProperties },
+        inlineModels,
+        operationContext ? toPascalCase(operationContext) : undefined,
+      );
+    }
+  }
+
+  return located.map((p) => {
+    const refTarget = resolveParamSchemaRef(p.schema, componentSchemas);
+    return {
+      name: p.name,
+      type: p.schema
+        ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+        : ({ kind: 'primitive', type: 'string' } as TypeRef),
+      required: p.required ?? false,
+      description: p.description,
+      deprecated: p.deprecated || p.schema?.deprecated || refTarget?.deprecated || undefined,
+      default: p.schema?.default ?? refTarget?.default,
+      example: p.example ?? p.schema?.example ?? refTarget?.example,
+      style: p.style as Parameter['style'],
+      explode: p.explode,
+    };
+  });
 }
 
 /**

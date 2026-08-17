@@ -591,6 +591,88 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].queryParams[0].default).toBeUndefined();
   });
 
+  describe('inline-object query param schemas materialize a model (no dangling reference)', () => {
+    // Real Stripe pattern (GET /v1/subscriptions, a `created` filter param):
+    // an anyOf query param -- either a structured range-filter object, or a
+    // plain timestamp. schemaToTypeRef() promises a model name for the
+    // inline-object variant; before this fix nothing materialized it for
+    // parameters (only request-body fields got that treatment), so the
+    // reference dangled -- confirmed as the root cause of ~20 "Unresolved
+    // model reference" warnings on Stripe's real spec, all in V1.* contexts.
+    it('materializes an anyOf inline-object variant on a query param', () => {
+      const paths = {
+        '/subscriptions': {
+          get: {
+            operationId: 'listSubscriptions',
+            parameters: [
+              {
+                name: 'created',
+                in: 'query' as const,
+                schema: {
+                  anyOf: [
+                    {
+                      type: 'object',
+                      properties: { gte: { type: 'integer' } },
+                      required: ['gte'],
+                    },
+                    { type: 'integer' },
+                  ],
+                },
+              },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      };
+
+      const { services, inlineModels } = extractOperations(paths);
+      const created = services[0].operations[0].queryParams![0];
+      expect(created.type.kind).toBe('union');
+      if (created.type.kind !== 'union') return;
+      const modelVariant = created.type.variants.find((v) => v.kind === 'model');
+      expect(modelVariant).toBeDefined();
+
+      const materialized = inlineModels.find((m) => m.name === (modelVariant as { name: string }).name);
+      expect(
+        materialized,
+        `expected a materialized model named "${(modelVariant as { name: string }).name}" in: ${inlineModels.map((m) => m.name).join(', ')}`,
+      ).toBeDefined();
+      expect(materialized!.fields.map((f) => f.name)).toEqual(['gte']);
+    });
+
+    it('materializes a direct inline-object query param schema', () => {
+      const paths = {
+        '/widgets': {
+          get: {
+            operationId: 'listWidgets',
+            parameters: [
+              {
+                name: 'filter',
+                in: 'query' as const,
+                schema: {
+                  type: 'object',
+                  properties: { name: { type: 'string' } },
+                  required: ['name'],
+                },
+              },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      };
+
+      const { services, inlineModels } = extractOperations(paths);
+      const filter = services[0].operations[0].queryParams![0];
+      // Parameters are qualified by service name (like schemaToTypeRef's own
+      // resolution), not the operation name -- "Widgets" (the service), not
+      // "ListWidgets" (the operation).
+      expect(filter.type).toEqual({ kind: 'model', name: 'WidgetsFilter' });
+      const materialized = inlineModels.find((m) => m.name === 'WidgetsFilter');
+      expect(materialized, `have: ${inlineModels.map((m) => m.name).join(', ')}`).toBeDefined();
+      expect(materialized!.fields.map((f) => f.name)).toEqual(['name']);
+    });
+  });
+
   it('extracts cookie parameters', () => {
     const paths = {
       '/users': {
