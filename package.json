@@ -1,6 +1,6 @@
 {
   "name": "@osmundus/oagen",
-  "version": "0.29.5",
+  "version": "0.29.6",
   "description": "Framework for building OpenAPI SDK emitters (fork of @workos/oagen, maintained by Osmundus)",
   "author": "WorkOS",
   "license": "MIT",

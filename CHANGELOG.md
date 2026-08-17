@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.6](https://github.com/ayudhinc/oagen/compare/v0.29.5...v0.29.6) (2026-08-17)
+
+
+### Bug Fixes
+
+* **parser:** materialize dangling model refs on inline-object parameter schemas ([70f517c](https://github.com/ayudhinc/oagen/commit/70f517ce1a3bd8fc6356681e0918a8d10d7c5ac4))
+
 ## [0.29.5](https://github.com/ayudhinc/oagen/compare/v0.29.4...v0.29.5) (2026-08-17)
 
 
