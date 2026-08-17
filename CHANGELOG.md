@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.0](https://github.com/ayudhinc/oagen/compare/v0.29.6...v0.30.0) (2026-08-17)
+
+
+### Features
+
+* **parser:** detect link-header pagination from a declared Link response header ([f7226b3](https://github.com/ayudhinc/oagen/commit/f7226b34956f3b74888d50fa91153a8ec8ece674))
+
+
+### Bug Fixes
+
+* **parser:** allOf member redeclaring a property overrides in place, not a duplicate field ([8e5695a](https://github.com/ayudhinc/oagen/commit/8e5695a91fc8928ee1009c251935e7259314bb84))
+
 ## [0.29.6](https://github.com/ayudhinc/oagen/compare/v0.29.5...v0.29.6) (2026-08-17)
 
 
