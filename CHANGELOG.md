@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.5](https://github.com/ayudhinc/oagen/compare/v0.29.4...v0.29.5) (2026-08-17)
+
+
+### Bug Fixes
+
+* **parser:** give model/enum name collisions the conventional Enum suffix ([4a03103](https://github.com/ayudhinc/oagen/commit/4a03103122652846df2442f755f1094d5dba4249))
+
 ## [0.29.4](https://github.com/ayudhinc/oagen/compare/v0.29.3...v0.29.4) (2026-08-16)
 
 
