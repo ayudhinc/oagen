@@ -73,6 +73,7 @@ interface RequestBodyObject {
 interface ResponseObject {
   description?: string;
   content?: Record<string, { schema?: SchemaObject }>;
+  headers?: Record<string, unknown>;
 }
 
 const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
@@ -506,6 +507,24 @@ function extractBodyParameterGroups(op: OperationObject, operationContext: strin
   return groups.length > 0 ? groups : undefined;
 }
 
+/** Whether any 2xx response declares a `Link` response header (case-
+ *  insensitive, matching HTTP header-name semantics) -- GitHub's real spec
+ *  pattern (`rel="next"`/`rel="prev"`/`rel="last"` links for paging), and
+ *  the signal detectPagination() uses to recognize link-header pagination
+ *  when no cursor/offset query-param shape is present. Some GitHub list
+ *  endpoints declare only `page` (no `per_page`/limit-like param), which
+ *  the existing offset-detection heuristic requires both of -- those
+ *  endpoints were previously undetected as paginated at all (silently
+ *  treated as a plain array response) despite genuinely paging via Link. */
+function successResponseHasLinkHeader(responses: Record<string, ResponseObject> | undefined): boolean {
+  if (!responses) return false;
+  for (const [status, resp] of Object.entries(responses)) {
+    if (!status.startsWith('2')) continue;
+    if (resp.headers && Object.keys(resp.headers).some((h) => h.toLowerCase() === 'link')) return true;
+  }
+  return false;
+}
+
 function buildOperation(
   method: HttpMethod,
   path: string,
@@ -544,7 +563,12 @@ function buildOperation(
   inlineModels.push(...reqBodyModels, ...paramInlineModels);
 
   // Build structured pagination metadata from response classification and query param detection
-  const paginationFromParams = detectPagination(response, queryParams, responseDataPath);
+  const paginationFromParams = detectPagination(
+    response,
+    queryParams,
+    responseDataPath,
+    successResponseHasLinkHeader(op.responses),
+  );
   let pagination: PaginationMeta | undefined;
   if (isPaginated) {
     const itemType = responseItemType ?? (response.kind === 'array' ? response.items : response);

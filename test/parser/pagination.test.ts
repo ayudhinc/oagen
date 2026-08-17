@@ -118,4 +118,66 @@ describe('detectPagination', () => {
     expect(result).not.toBeNull();
     expect(result!.dataPath).toBeUndefined();
   });
+
+  describe('link-header pagination', () => {
+    // Real GitHub pattern: some list endpoints declare only `page` (no
+    // `per_page`/limit-like param), which the offset heuristic requires
+    // both of -- these were previously undetected as paginated at all,
+    // despite the response genuinely declaring a `Link` header for real
+    // rel="next" paging.
+    it('detects link-header pagination when the response has a Link header and no cursor/offset param shape applies', () => {
+      const result = detectPagination(
+        { kind: 'array', items: { kind: 'model', name: 'Task' } },
+        [makeParam('page')],
+        undefined,
+        true,
+      );
+      expect(result).toEqual({
+        strategy: 'link-header',
+        param: 'page',
+        dataPath: undefined,
+        itemType: { kind: 'model', name: 'Task' },
+      });
+    });
+
+    it('captures an empty param when no page-establishing query param is declared at all', () => {
+      const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Task' } }, [], undefined, true);
+      expect(result?.param).toBe('');
+    });
+
+    it('prefers cursor detection over a Link header when both signals are present', () => {
+      const result = detectPagination(
+        { kind: 'array', items: { kind: 'model', name: 'Event' } },
+        [makeParam('after')],
+        undefined,
+        true,
+      );
+      expect(result?.strategy).toBe('cursor');
+    });
+
+    it('prefers offset detection over a Link header when both signals are present', () => {
+      const result = detectPagination(
+        { kind: 'array', items: { kind: 'model', name: 'Item' } },
+        [makeParam('page'), makeParam('per_page')],
+        undefined,
+        true,
+      );
+      expect(result?.strategy).toBe('offset');
+    });
+
+    it('returns null when there is no Link header and no cursor/offset shape (default hasLinkHeader=false)', () => {
+      const result = detectPagination({ kind: 'array', items: { kind: 'model', name: 'Task' } }, [makeParam('page')]);
+      expect(result).toBeNull();
+    });
+
+    it('does not detect link-header pagination on a non-array (single-resource) response, even with a Link header present', () => {
+      // Real GitHub pattern: a shared response component with a Link header
+      // reused across both a LIST operation and a sibling single-resource
+      // GET/PATCH -- without this guard, the single-resource operation was
+      // wrongly flagged as paginated too (22 false positives on GitHub's
+      // real spec before this guard).
+      const result = detectPagination({ kind: 'model', name: 'Team' }, [], undefined, true);
+      expect(result).toBeNull();
+    });
+  });
 });

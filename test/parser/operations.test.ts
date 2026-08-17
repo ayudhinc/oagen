@@ -151,6 +151,73 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].pagination).toBeDefined();
   });
 
+  it('detects link-header pagination end-to-end from a raw Link response header (real GitHub shape: page param, no per_page)', () => {
+    const paths = {
+      '/tasks': {
+        get: {
+          operationId: 'listTasks',
+          parameters: [{ name: 'page', in: 'query' as const, schema: { type: 'integer' } }],
+          responses: {
+            '200': {
+              description: 'ok',
+              headers: { Link: { description: 'Pagination links', schema: { type: 'string' } } },
+              content: {
+                'application/json': {
+                  schema: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    const pagination = services[0].operations[0].pagination;
+    expect(pagination).toBeDefined();
+    expect(pagination!.strategy).toBe('link-header');
+    expect(pagination!.param).toBe('page');
+  });
+
+  it('a case-insensitively-named Link header still triggers link-header detection', () => {
+    const paths = {
+      '/tasks': {
+        get: {
+          operationId: 'listTasks',
+          responses: {
+            '200': {
+              description: 'ok',
+              headers: { link: { schema: { type: 'string' } } },
+              content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pagination?.strategy).toBe('link-header');
+  });
+
+  it('no Link header, no cursor/offset shape -- pagination stays undetected', () => {
+    const paths = {
+      '/tasks': {
+        get: {
+          operationId: 'listTasks',
+          responses: {
+            '200': {
+              description: 'ok',
+              content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths);
+    expect(services[0].operations[0].pagination).toBeUndefined();
+  });
+
   it('returns empty for undefined paths', () => {
     const { services, inlineModels } = extractOperations(undefined);
     expect(services).toEqual([]);
